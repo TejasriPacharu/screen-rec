@@ -1,0 +1,877 @@
+"use client";
+
+import { useState, useRef, useCallback, useEffect } from "react";
+import { useAuth } from "@/lib/auth-context";
+import { apiClient, Recording } from "@/lib/api";
+import { uploadFile } from "@/lib/uploadFile";
+import VideoTrimmer from "./VideoTrimmer";
+
+// Maximum recording duration in milliseconds (3 minutes)
+const MAX_RECORDING_DURATION = 3 * 60 * 1000;
+
+export default function ScreenRecorder() {
+  // Recording state
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
+  const { logout } = useAuth();
+
+  // Microphone toggle state
+  const [includeMic, setIncludeMic] = useState(true);
+
+  // Inline editing state for rename feature
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+  const editInputRef = useRef<HTMLInputElement>(null);
+
+  // Share link copied state
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Visibility toggle notification state
+  const [visibilityMessage, setVisibilityMessage] = useState<string | null>(null);
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isSearchExpanded, setIsSearchExpanded] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Trim editor state
+  const [showTrimEditor, setShowTrimEditor] = useState(false);
+  const [editingVideoId, setEditingVideoId] = useState<string | null>(null);
+
+  // Refs for MediaRecorder and stream management
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const recordingStartTimeRef = useRef<number | null>(null);
+  const tempRecordingBlobRef = useRef<Blob | null>(null);
+
+  // Load all saved recordings on mount
+  useEffect(() => {
+    loadRecordings();
+  }, []);
+
+  // Focus input when editing starts
+  useEffect(() => {
+    if (editingId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingId]);
+
+  // Focus search input when expanded
+  useEffect(() => {
+    if (isSearchExpanded && searchInputRef.current) {
+      searchInputRef.current.focus();
+    }
+  }, [isSearchExpanded]);
+
+  // Keyboard shortcut for search (Cmd/Ctrl + K)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setIsSearchExpanded(true);
+      }
+      // Escape to close search
+      if (e.key === "Escape" && isSearchExpanded) {
+        setIsSearchExpanded(false);
+        setSearchQuery("");
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isSearchExpanded]);
+
+  // Load recordings from backend
+  const loadRecordings = async () => {
+    try {
+      setIsLoading(true);
+      const allRecordings = await apiClient.getRecordings();
+      setRecordings(allRecordings);
+    } catch (err) {
+      console.error("Failed to load recordings:", err);
+      setError("Failed to load recordings");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Delete a recording
+  const handleDelete = useCallback(
+    async (id: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      try {
+        await apiClient.deleteRecording(id);
+        await loadRecordings();
+      } catch (err) {
+        console.error("Failed to delete recording:", err);
+        setError("Failed to delete recording");
+      }
+    },
+    [],
+  );
+
+  // Start inline editing for rename
+  const startEditing = (rec: Recording, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingId(rec._id);
+    setEditingName(rec.title || "");
+  };
+  // Save renamed recording
+  const saveRename = async () => {
+    if (!editingId || !editingName.trim()) {
+      setEditingId(null);
+      return;
+    }
+
+    try {
+      await apiClient.updateRecording(editingId, { title: editingName.trim() });
+      await loadRecordings();
+    } catch (err) {
+      console.error("Failed to rename recording:", err);
+      setError("Failed to rename recording");
+    }
+
+    setEditingId(null);
+  };
+
+  // Handle keyboard events for inline editing
+  const handleEditKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      saveRename();
+    } else if (e.key === "Escape") {
+      setEditingId(null);
+    }
+  };
+
+  // Handle save from trim editor
+  const handleTrimSave = async (
+    trimmedBlob: Blob,
+    startTime: number,
+    endTime: number,
+  ) => {
+    if (!editingVideoId) return;
+
+    try {
+      setIsLoading(true);
+      const duration = Math.floor(endTime - startTime);
+
+      // Generate default name with timestamp
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      });
+      const defaultName = `Recording – ${timeStr}`;
+
+      // Step 1: Create recording entry in backend and get upload URL
+      const { recording, uploadUrl } = await apiClient.createRecording(
+        defaultName,
+        trimmedBlob.type,
+      );
+
+      // Step 2: Convert blob to File for upload
+      const file = new File([trimmedBlob], `${recording._id}.webm`, {
+        type: trimmedBlob.type,
+      });
+
+      console.log(`HEREEEEEE ${uploadUrl}`);
+      // Step 3: Upload file to cloud storage
+      await uploadFile(uploadUrl, file);
+
+      // Step 4: Update recording with metadata
+      await apiClient.updateRecording(recording._id, {
+        size: trimmedBlob.size,
+        duration,
+      });
+
+      // Reload recordings to show the new recording
+      await loadRecordings();
+
+      // Close trim editor
+      setShowTrimEditor(false);
+      setEditingVideoId(null);
+
+      // Clear the temporary recording blob
+      if (tempRecordingBlobRef.current) {
+        tempRecordingBlobRef.current = null;
+      }
+    } catch (err) {
+      console.error("Failed to save trimmed video:", err);
+      setError("Failed to save recording to cloud");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Cancel trim editor
+  const handleTrimCancel = () => {
+    setShowTrimEditor(false);
+    setEditingVideoId(null);
+
+    // Clear the temporary recording blob
+    if (tempRecordingBlobRef.current) {
+      tempRecordingBlobRef.current = null;
+    }
+  };
+
+  // Handle share - copy link to clipboard
+  const handleShare = async (recording: Recording, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const baseUrl = process.env.NEXT_PUBLIC_URL || window.location.origin;
+      const shareUrl = `${baseUrl}/${recording.link}`;
+      await navigator.clipboard.writeText(shareUrl);
+
+      // Show "Copied!" feedback
+      setCopiedId(recording._id);
+      setError(null);
+      console.log("Link copied to clipboard:", shareUrl);
+
+      // Reset after 2 seconds
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch (err) {
+      console.error("Failed to copy link:", err);
+      setError("Failed to copy link to clipboard");
+    }
+  };
+
+  // Toggle public/private status
+  const togglePublic = async (recording: Recording, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const newPublicState = !recording.public;
+      await apiClient.updateRecording(recording._id, {
+        public: newPublicState
+      });
+
+      // Show notification
+      setVisibilityMessage(
+        newPublicState
+          ? "Recording is now public - anyone with the link can view it"
+          : "Recording is now private - only you can view it"
+      );
+      setTimeout(() => setVisibilityMessage(null), 4000);
+
+      await loadRecordings();
+    } catch (err) {
+      console.error("Failed to toggle public status:", err);
+      setError("Failed to update recording visibility");
+    }
+  };
+
+  // Start screen recording
+  const startRecording = useCallback(async () => {
+    try {
+      setError(null);
+      setRecordingTime(0);
+      chunksRef.current = [];
+      recordingStartTimeRef.current = Date.now();
+
+      // Request screen sharing permission
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+
+      streamRef.current = screenStream;
+      let finalStream: MediaStream;
+
+      if (includeMic) {
+        try {
+          // Request microphone access
+          const micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+            video: false,
+          });
+
+          micStreamRef.current = micStream;
+
+          // Mix screen audio + mic audio using Web Audio API
+          const audioContext = new AudioContext();
+          audioContextRef.current = audioContext;
+          const destination = audioContext.createMediaStreamDestination();
+
+          // Add screen audio if present
+          const screenAudioTracks = screenStream.getAudioTracks();
+          if (screenAudioTracks.length > 0) {
+            const screenAudioStream = new MediaStream(screenAudioTracks);
+            const screenSource =
+              audioContext.createMediaStreamSource(screenAudioStream);
+            screenSource.connect(destination);
+          }
+
+          // Add microphone audio
+          const micSource = audioContext.createMediaStreamSource(micStream);
+          micSource.connect(destination);
+
+          // Final stream: screen video + mixed audio
+          finalStream = new MediaStream([
+            ...screenStream.getVideoTracks(),
+            ...destination.stream.getAudioTracks(),
+          ]);
+        } catch (micError) {
+          console.warn(
+            "Microphone access denied, recording screen only:",
+            micError,
+          );
+          finalStream = screenStream;
+        }
+      } else {
+        finalStream = screenStream;
+      }
+
+      // Determine supported MIME type
+      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+        ? "video/webm;codecs=vp9"
+        : MediaRecorder.isTypeSupported("video/webm")
+          ? "video/webm"
+          : "video/mp4";
+
+      const mediaRecorder = new MediaRecorder(finalStream, { mimeType });
+      mediaRecorderRef.current = mediaRecorder;
+
+      // Collect video data chunks
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      // Handle recording stop
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunksRef.current, { type: mimeType });
+        const duration =
+          recordingStartTimeRef.current != null
+            ? Math.floor((Date.now() - recordingStartTimeRef.current) / 1000)
+            : recordingTime;
+
+        try {
+          // Store the recording blob temporarily for trimming
+          tempRecordingBlobRef.current = blob;
+
+          // Generate a temporary ID for the trim editor
+          const tempId = `temp-${Date.now()}`;
+
+          // Open trim editor immediately
+          setEditingVideoId(tempId);
+          setShowTrimEditor(true);
+        } catch (err) {
+          console.error("Failed to prepare recording for trimming:", err);
+          setError("Failed to prepare recording for trimming");
+        }
+
+        // Cleanup streams
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        micStreamRef.current?.getTracks().forEach((track) => track.stop());
+        audioContextRef.current?.close();
+
+        if (timerRef.current) clearInterval(timerRef.current);
+        if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
+        recordingStartTimeRef.current = null;
+
+        setIsRecording(false);
+        setRecordingTime(0);
+      };
+
+      // Handle user stopping screen share via browser UI
+      screenStream.getVideoTracks()[0].onended = () => {
+        if (mediaRecorderRef.current?.state === "recording") {
+          mediaRecorderRef.current.stop();
+        }
+      };
+
+      // Start recording
+      mediaRecorder.start(1000);
+      setIsRecording(true);
+
+      // Recording timer
+      timerRef.current = setInterval(() => {
+        if (recordingStartTimeRef.current != null) {
+          const elapsedMs = Date.now() - recordingStartTimeRef.current;
+          setRecordingTime(Math.floor(elapsedMs / 1000));
+        }
+      }, 1000);
+
+      // Auto-stop after max duration
+      autoStopTimerRef.current = setTimeout(() => {
+        if (mediaRecorderRef.current?.state === "recording") {
+          mediaRecorderRef.current.stop();
+        }
+      }, MAX_RECORDING_DURATION);
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error ? err.message : "Failed to start recording";
+      setError(errorMessage);
+      console.error("Recording error:", err);
+    }
+  }, [includeMic, recordingTime]);
+
+  // Stop recording manually
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+  }, []);
+
+  const formatDuration = (totalSeconds: number) => {
+    if (totalSeconds < 0) return "0:00";
+
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+
+    // Pad with leading zero if needed
+    const formattedMinutes = minutes.toString().padStart(2, "0");
+    const formattedSeconds = seconds.toString().padStart(2, "0");
+
+    return `${formattedMinutes}:${formattedSeconds}`;
+  };
+
+  // Format timestamp to readable date
+  const formatDate = (timestamp: string) => {
+    return new Date(timestamp).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  };
+
+  // Format file size
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  // Filter recordings based on search query
+  const filteredRecordings = recordings.filter((rec) => {
+    if (!searchQuery.trim()) return true;
+    const query = searchQuery.toLowerCase();
+    return (
+      rec.title?.toLowerCase().includes(query) ||
+      rec.link?.toLowerCase().includes(query)
+    );
+  });
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-6 md:p-8">
+      <div className="max-w-4xl mx-auto space-y-6">
+        {/* Header with search and logout */}
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="text-2xl font-semibold text-gray-900">
+            Screen Recorder
+          </h1>
+
+          <div className="flex items-center gap-3">
+            {/* Search bar */}
+            <div className="flex items-center gap-2">
+              {isSearchExpanded ? (
+                <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right duration-200">
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search recordings..."
+                    className="w-64 px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                  />
+                  <button
+                    onClick={() => {
+                      setIsSearchExpanded(false);
+                      setSearchQuery("");
+                    }}
+                    className="p-1.5 text-gray-400 hover:text-gray-600 transition-colors"
+                    title="Close search (Esc)"
+                  >
+                    <svg
+                      className="w-5 h-5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setIsSearchExpanded(true)}
+                  className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                  title="Search (⌘K)"
+                >
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                    />
+                  </svg>
+                </button>
+              )}
+            </div>
+
+            <button
+              onClick={logout}
+              className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
+
+        {/* Status Messages */}
+        {error && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+            {error}
+          </div>
+        )}
+
+        {/* Visibility toggle notification */}
+        {visibilityMessage && (
+          <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-blue-700 text-sm flex items-center gap-2">
+            <svg
+              className="w-5 h-5 flex-shrink-0"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
+            </svg>
+            {visibilityMessage}
+          </div>
+        )}
+
+        {/* Recording controls */}
+        <div className="flex flex-wrap items-center gap-4">
+          {!isRecording ? (
+            <>
+              <button
+                onClick={startRecording}
+                disabled={isLoading}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-800 transition-colors focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-offset-2"
+              >
+                <span className="w-2 h-2 bg-red-500 rounded-full" />
+                Record Screen
+              </button>
+
+              {/* Microphone toggle */}
+              <button
+                onClick={() => setIncludeMic(!includeMic)}
+                disabled={isLoading}
+                className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 ${
+                  includeMic
+                    ? "bg-gray-900 text-white border-gray-900 hover:bg-gray-800 focus:ring-gray-900"
+                    : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50 focus:ring-gray-400"
+                }`}
+              >
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
+                  />
+                </svg>
+                Mic {includeMic ? "On" : "Off"}
+              </button>
+            </>
+          ) : (
+            <div className="flex items-center gap-4">
+              <div className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-50 rounded-lg">
+                <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse" />
+                <span className="font-mono text-sm text-gray-900">
+                  {formatDuration(recordingTime)}
+                </span>
+              </div>
+              <button
+                onClick={stopRecording}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors focus:outline-none focus:ring-2 focus:ring-red-600 focus:ring-offset-2"
+              >
+                <span className="w-2.5 h-2.5 bg-white rounded-sm" />
+                Stop
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Recordings List - Vertical Layout */}
+        {recordings.length > 0 && (
+          <div className="space-y-3">
+            <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide">
+              {searchQuery ? (
+                <>
+                  Found {filteredRecordings.length} of {recordings.length} recordings
+                </>
+              ) : (
+                <>Recordings ({recordings.length})</>
+              )}
+            </h2>
+
+            {filteredRecordings.length === 0 ? (
+              <div className="p-8 text-center text-gray-500 bg-white rounded-xl border border-gray-200">
+                <svg
+                  className="w-12 h-12 mx-auto mb-3 text-gray-400"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+                <p className="text-sm">No recordings found matching "{searchQuery}"</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filteredRecordings.map((rec) => (
+                <div
+                  key={rec._id}
+                  onClick={() => window.location.href = `/${rec.link}`}
+                  className="group flex items-center justify-between p-4 rounded-xl border cursor-pointer transition-all bg-white border-gray-200 hover:border-gray-300 hover:shadow-sm"
+                >
+                  {/* Left side: Name and metadata */}
+                  <div className="flex-1 min-w-0 space-y-1">
+                    {/* Recording name - inline editable */}
+                    {editingId === rec._id ? (
+                      <input
+                        ref={editInputRef}
+                        type="text"
+                        value={editingName}
+                        onChange={(e) => setEditingName(e.target.value)}
+                        onBlur={saveRename}
+                        onKeyDown={handleEditKeyDown}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-full px-2 py-1 text-sm font-medium text-gray-900 bg-white border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                      />
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-gray-900 truncate">
+                          {rec.title || "Untitled Recording"}
+                        </span>
+                        {/* Edit/Rename button */}
+                        <button
+                          onClick={(e) => startEditing(rec, e)}
+                          className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-gray-600 transition-opacity focus:opacity-100 focus:outline-none"
+                          title="Rename"
+                        >
+                          <svg
+                            className="w-3.5 h-3.5"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                            />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Metadata row: duration, size, date */}
+                    <div className="flex items-center gap-3 text-xs text-gray-500">
+                      {/* Duration */}
+                      {rec.duration && (
+                        <span className="inline-flex items-center gap-1">
+                          <svg
+                            className="w-3.5 h-3.5"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                            />
+                          </svg>
+                          {formatDuration(rec.duration)}
+                        </span>
+                      )}
+
+                      {/* Size */}
+                      {rec.size && (
+                        <span className="inline-flex items-center gap-1">
+                          <svg
+                            className="w-3.5 h-3.5"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"
+                            />
+                          </svg>
+                          {formatSize(rec.size)}{" "}
+                          {rec.duration && `• ${formatDuration(rec.duration)}`}
+                        </span>
+                      )}
+
+                      {/* Date */}
+                      <span className="flex items-center text-xs text-gray-400">
+                        <svg
+                          className="w-3 h-3 mr-1"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
+                          />
+                        </svg>
+                        {formatDate(rec.createdAt)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Right side: Actions */}
+                  <div className="flex items-center gap-2 ml-4">
+                    {/* Copied indicator */}
+                    {copiedId === rec._id && (
+                      <span className="text-xs font-medium text-green-600 animate-pulse">
+                        Copied!
+                      </span>
+                    )}
+
+                    {/* Public/Private toggle */}
+                    <button
+                      onClick={(e) => togglePublic(rec, e)}
+                      className={`opacity-0 group-hover:opacity-100 p-2 rounded-lg transition-all focus:opacity-100 focus:outline-none ${
+                        rec.public
+                          ? "text-green-600 bg-green-50 hover:bg-green-100"
+                          : "text-gray-300 hover:text-gray-400 hover:bg-gray-50"
+                      }`}
+                      title={
+                        rec.public
+                          ? "Public - Anyone with link can view • Click to make private"
+                          : "Private - Only you can view • Click to make public"
+                      }
+                    >
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                      </svg>
+                    </button>
+
+                    {/* Share button */}
+                    <button
+                      onClick={(e) => handleShare(rec, e)}
+                      className={`opacity-0 group-hover:opacity-100 p-2 rounded-lg transition-all focus:opacity-100 focus:outline-none ${
+                        copiedId === rec._id
+                          ? "text-green-600 bg-green-50 opacity-100"
+                          : "text-gray-400 hover:text-green-600 hover:bg-green-50"
+                      }`}
+                      title="Copy share link"
+                    >
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"
+                        />
+                      </svg>
+                    </button>
+
+                    {/* Delete button */}
+                    <button
+                      onClick={(e) => handleDelete(rec._id, e)}
+                      className="opacity-0 group-hover:opacity-100 p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all focus:opacity-100 focus:outline-none"
+                      title="Delete recording"
+                    >
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Trim Editor Modal */}
+      {showTrimEditor && editingVideoId && (
+        <VideoTrimmer
+          videoId={editingVideoId}
+          onSave={handleTrimSave}
+          onCancel={handleTrimCancel}
+          tempBlob={tempRecordingBlobRef.current || undefined}
+        />
+      )}
+    </div>
+  );
+}
