@@ -128,6 +128,7 @@ export default function RecordingView() {
       size={recording.size}
       views={recording.views}
       createdAt={recording.createdAt}
+      ai = {recording.ai}
     />
   );
 }

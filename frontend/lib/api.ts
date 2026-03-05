@@ -17,6 +17,34 @@ export interface Recording {
   views?: number;
   public?: boolean;
   createdAt: string;
+  // ── New AI pipeline fields ──
+  status?: 'PROCESSING' | 'TRANSCRIBED' | 'AI_GENERATED' | 'READY' | 'FAILED' | null;
+  transcript?: string;
+  error?: string;
+  ai?: {
+    title: string;
+    summary: string;
+    chapters: { timestamp: string; heading: string }[];
+    keyTakeaways: string[];
+  };
+}
+
+export interface ProcessRecordingResponse {
+  message: string;
+  recordingId: string;
+  link: string;
+}
+
+export interface RecordingStatusResponse {
+  _id: string;
+  status: Recording['status'];
+  title: string;
+  link: string;
+  s3Key?: string;
+  ai?: Recording['ai'];
+  error?: string;
+  duration?: number;
+  createdAt: string;
 }
 
 export interface AuthResponse {
@@ -134,6 +162,43 @@ class ApiClient {
 
   async getRecordingByLink(link: string): Promise<Recording & { viewUrl: string }> {
     return this.request<Recording & { viewUrl: string }>(`/recordings/${link}`);
+  }
+
+  // Send video blob to AI pipeline
+  async processRecording(
+    blob: Blob,
+    duration: number
+  ): Promise<ProcessRecordingResponse> {
+    const url = `${API_BASE_URL}/recordings/process`;
+
+    const formData = new FormData();
+    formData.append('video', blob, 'recording.webm');
+    formData.append('duration', String(duration));
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        // No Content-Type here — browser sets it with boundary for multipart
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        this.logout();
+        throw new Error('Authentication failed. Please log in again.');
+      }
+      const error = await response.json().catch(() => ({ error: 'Network error' }));
+      throw new Error(error.error || `HTTP ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  // Poll for pipeline status
+  async getRecordingStatus(id: string): Promise<RecordingStatusResponse> {
+    return this.request<RecordingStatusResponse>(`/recordings/${id}/status`);
   }
 }
 

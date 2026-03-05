@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL, fetchFile } from '@ffmpeg/util';
-import { getVideo } from '@/lib/indexeddb';
+
 
 interface VideoTrimmerProps {
   videoId: string;
@@ -46,27 +46,19 @@ export default function VideoTrimmer({ videoId, onSave, onCancel, recordedDurati
 
   // Load video from IndexedDB or use temporary blob
   const loadVideo = async () => {
-    try {
-      let blob: Blob | null = null;
-      
-      if (tempBlob) {
-        // Use the temporary blob passed from parent (for just-recorded videos)
-        blob = tempBlob;
-      } else {
-        // Load from IndexedDB for existing recordings
-        blob = await getVideo(videoId);
-      }
-      
-      if (blob) {
-        videoBlobRef.current = blob;
-        const url = URL.createObjectURL(blob);
-        setVideoUrl(url);
-      }
-    } catch (err) {
-      console.error('Failed to load video:', err);
-      setError('Failed to load video');
+  try {
+    if (!tempBlob) {
+      setError('No video to edit.');
+      return;
     }
-  };
+    videoBlobRef.current = tempBlob;
+    const url = URL.createObjectURL(tempBlob);
+    setVideoUrl(url);
+  } catch (err) {
+    console.error('Failed to load video:', err);
+    setError('Failed to load video');
+  }
+};
 
   // Load FFmpeg
   const loadFFmpeg = async () => {

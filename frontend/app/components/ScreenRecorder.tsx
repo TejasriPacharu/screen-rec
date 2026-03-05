@@ -5,7 +5,7 @@ import { useAuth } from "@/lib/auth-context";
 import { apiClient, Recording } from "@/lib/api";
 import { uploadFile } from "@/lib/uploadFile";
 import VideoTrimmer from "./VideoTrimmer";
-
+import ProcessingStatus from "./ProcessingStatus";
 // Maximum recording duration in milliseconds (3 minutes)
 const MAX_RECORDING_DURATION = 3 * 60 * 1000;
 
@@ -51,6 +51,9 @@ export default function ScreenRecorder() {
   const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null);
   const recordingStartTimeRef = useRef<number | null>(null);
   const tempRecordingBlobRef = useRef<Blob | null>(null);
+
+  // Track recordings currently processing (can have multiple in flight)
+  const [processingIds, setProcessingIds] = useState<string[]>([]);
 
   // Load all saved recordings on mount
   useEffect(() => {
@@ -152,66 +155,46 @@ export default function ScreenRecorder() {
     }
   };
 
-  // Handle save from trim editor
   const handleTrimSave = async (
-    trimmedBlob: Blob,
-    startTime: number,
-    endTime: number,
-  ) => {
-    if (!editingVideoId) return;
+  trimmedBlob: Blob,
+  startTime: number,
+  endTime: number,
+) => {
+  if (!editingVideoId) return;
 
-    try {
-      setIsLoading(true);
-      const duration = Math.floor(endTime - startTime);
+  try {
+    setIsLoading(true);
+    const duration = Math.floor(endTime - startTime) || Math.floor(endTime);
 
-      // Generate default name with timestamp
-      const now = new Date();
-      const timeStr = now.toLocaleTimeString(undefined, {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      });
-      const defaultName = `Recording – ${timeStr}`;
+    // Send blob directly to backend AI pipeline
+    const { recordingId } = await apiClient.processRecording(trimmedBlob, duration);
 
-      // Step 1: Create recording entry in backend and get upload URL
-      const { recording, uploadUrl } = await apiClient.createRecording(
-        defaultName,
-        trimmedBlob.type,
-      );
+    // Add to in-progress list — ProcessingStatus will poll for this
+    setProcessingIds((prev) => [...prev, recordingId]);
 
-      // Step 2: Convert blob to File for upload
-      const file = new File([trimmedBlob], `${recording._id}.webm`, {
-        type: trimmedBlob.type,
-      });
+    // Close trim editor immediately — processing is async
+    setShowTrimEditor(false);
+    setEditingVideoId(null);
+    if (tempRecordingBlobRef.current) tempRecordingBlobRef.current = null;
+  } catch (err) {
+    console.error('Failed to submit recording:', err);
+    setError(err instanceof Error ? err.message : 'Failed to submit recording');
+  } finally {
+    setIsLoading(false);
+  }
+};
 
-      console.log(`HEREEEEEE ${uploadUrl}`);
-      // Step 3: Upload file to cloud storage
-      await uploadFile(uploadUrl, file);
+  const handleProcessingComplete = useCallback(async (recordingId: string) => {
+    // Remove from processing list
+    setProcessingIds((prev) => prev.filter((id) => id !== recordingId));
+    // Refresh the recordings list to show the new ready recording
+    await loadRecordings();
+  }, []);
 
-      // Step 4: Update recording with metadata
-      await apiClient.updateRecording(recording._id, {
-        size: trimmedBlob.size,
-        duration,
-      });
-
-      // Reload recordings to show the new recording
-      await loadRecordings();
-
-      // Close trim editor
-      setShowTrimEditor(false);
-      setEditingVideoId(null);
-
-      // Clear the temporary recording blob
-      if (tempRecordingBlobRef.current) {
-        tempRecordingBlobRef.current = null;
-      }
-    } catch (err) {
-      console.error("Failed to save trimmed video:", err);
-      setError("Failed to save recording to cloud");
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const handleProcessingError = useCallback((recordingId: string, msg: string) => {
+    setProcessingIds((prev) => prev.filter((id) => id !== recordingId));
+    setError(msg);
+  }, []);
 
   // Cancel trim editor
   const handleTrimCancel = () => {
@@ -627,6 +610,20 @@ export default function ScreenRecorder() {
             </div>
           )}
         </div>
+
+                {/* Active processing jobs */}
+        {processingIds.length > 0 && (
+          <div className="space-y-2">
+            {processingIds.map((id) => (
+              <ProcessingStatus
+                key={id}
+                recordingId={id}
+                onComplete={() => handleProcessingComplete(id)}
+                onError={(msg) => handleProcessingError(id, msg)}
+              />
+            ))}
+          </div>
+        )}
 
         {/* Recordings List - Vertical Layout */}
         {recordings.length > 0 && (

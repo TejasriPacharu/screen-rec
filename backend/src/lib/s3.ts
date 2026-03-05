@@ -25,7 +25,7 @@ export class AwsS3Service {
         accessKeyId: S3_KEY_ID,
         secretAccessKey: S3_APP_KEY,
       },
-      tls: true,
+      forcePathStyle: true,
     });
   }
 
@@ -78,5 +78,20 @@ export class AwsS3Service {
     } catch (error) {
       throw new Error(`Failed to delete file from S3: ${error.message}`);
     }
+  }
+
+  async uploadFile(
+    bucketName: string,
+    key: string,
+    body: Buffer | NodeJS.ReadableStream,
+    contentType: string
+  ): Promise<void> {
+    const command = new PutObjectCommand({
+      Bucket: bucketName,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    });
+    await this.s3Client.send(command);
   }
 }
