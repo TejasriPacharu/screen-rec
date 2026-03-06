@@ -1,13 +1,14 @@
 'use client';
 
+// frontend/src/lib/auth-context.tsx
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { apiClient } from './api';
+import { apiClient, User } from './api';
 
 interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string) => Promise<void>;
+  user: User | null;
+  loginWithGoogle: () => void;
   logout: () => void;
 }
 
@@ -15,37 +16,39 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading]             = useState(true);
+  const [user, setUser]                       = useState<User | null>(null);
 
   useEffect(() => {
-    // Check if user is already authenticated
-    setIsAuthenticated(apiClient.isAuthenticated());
-    setIsLoading(false);
+    const init = async () => {
+      if (!apiClient.isAuthenticated()) {
+        setIsLoading(false);
+        return;
+      }
+      try {
+        const me = await apiClient.getMe();
+        setUser(me);
+        setIsAuthenticated(true);
+      } catch {
+        // Token invalid / expired — clear it
+        apiClient.logout();
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    init();
   }, []);
 
-  const login = async (email: string, password: string) => {
-    await apiClient.login(email, password);
-    setIsAuthenticated(true);
-  };
-
-  const register = async (email: string, password: string) => {
-    await apiClient.register(email, password);
-    setIsAuthenticated(true);
-  };
+  const loginWithGoogle = () => apiClient.loginWithGoogle();
 
   const logout = () => {
     apiClient.logout();
     setIsAuthenticated(false);
+    setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{
-      isAuthenticated,
-      isLoading,
-      login,
-      register,
-      logout,
-    }}>
+    <AuthContext.Provider value={{ isAuthenticated, isLoading, user, loginWithGoogle, logout }}>
       {children}
     </AuthContext.Provider>
   );
@@ -53,8 +56,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
+  if (!context) throw new Error('useAuth must be used within an AuthProvider');
   return context;
 }
