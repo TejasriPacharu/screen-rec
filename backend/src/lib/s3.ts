@@ -1,3 +1,4 @@
+// backend/src/lib/s3.ts
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -6,6 +7,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import fs from "fs";
 import {
   S3_ENDPOINT,
   S3_REGION,
@@ -29,10 +31,6 @@ export class AwsS3Service {
     });
   }
 
-
-  /*
-  The filename passed here must be the full path of the file in the bucket
-  */
   async generateSignedUploadUrl(
     bucketName: string,
     filename: string,
@@ -44,11 +42,7 @@ export class AwsS3Service {
       Key: filename,
       ContentType: contentType,
     });
-
-    const uploadUrl = await getSignedUrl(this.s3Client, command, {
-      expiresIn,
-    });
-    return uploadUrl;
+    return getSignedUrl(this.s3Client, command, { expiresIn });
   }
 
   async generateSignedViewUrl(
@@ -60,12 +54,7 @@ export class AwsS3Service {
       Bucket: bucketName,
       Key: filename,
     });
-
-    const signedUrl = await getSignedUrl(this.s3Client, command, {
-      expiresIn,
-    });
-
-    return signedUrl;
+    return getSignedUrl(this.s3Client, command, { expiresIn });
   }
 
   async deleteFile(bucketName: string, filename: string): Promise<void> {
@@ -76,14 +65,17 @@ export class AwsS3Service {
       });
       await this.s3Client.send(command);
     } catch (error) {
-      throw new Error(`Failed to delete file from S3: ${error.message}`);
+      // error is unknown — cast safely
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to delete file from S3: ${message}`);
     }
   }
 
   async uploadFile(
     bucketName: string,
     key: string,
-    body: Buffer | NodeJS.ReadableStream,
+    // Use fs.ReadStream instead of the browser ReadableStream
+    body: Buffer | fs.ReadStream,
     contentType: string
   ): Promise<void> {
     const command = new PutObjectCommand({
@@ -91,6 +83,24 @@ export class AwsS3Service {
       Key: key,
       Body: body,
       ContentType: contentType,
+    });
+    await this.s3Client.send(command);
+  }
+
+  // ── CORS helper (used by applyCors.ts script) ─────────────────────────────
+  async applyCors(bucketName: string): Promise<void> {
+    const command = new PutBucketCorsCommand({
+      Bucket: bucketName,
+      CORSConfiguration: {
+        CORSRules: [
+          {
+            AllowedHeaders: ["*"],
+            AllowedMethods: ["GET", "PUT", "POST", "DELETE"],
+            AllowedOrigins: S3_CORS_ALLOWED_ORIGINS,
+            ExposeHeaders: ["ETag"],
+          },
+        ],
+      },
     });
     await this.s3Client.send(command);
   }
