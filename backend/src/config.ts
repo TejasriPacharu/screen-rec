@@ -32,3 +32,9 @@ export const GOOGLE_CALLBACK_URL    = process.env.GOOGLE_CALLBACK_URL
 // Frontend URL — redirect here after successful OAuth
 export const FRONTEND_URL           = process.env.FRONTEND_URL
   || "http://localhost:3000";
+
+// ── n8n Fallback ──────────────────────────────────────────────────────────────
+// Webhook URL from n8n — set after creating the workflow
+export const N8N_WEBHOOK_URL         = process.env.N8N_WEBHOOK_URL || "";
+// Shared secret between backend and n8n for internal endpoints
+export const INTERNAL_SECRET         = process.env.INTERNAL_SECRET!;

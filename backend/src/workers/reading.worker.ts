@@ -1,11 +1,14 @@
-// backend/src/workers/recording.worker.ts
+// backend/src/workers/reading.worker.ts
 import { Worker, Job } from "bullmq";
 import fs from "fs";
+import fetch from "node-fetch";
 import { redisConnection } from "../lib/redis";
 import { Recording } from "../models/Recording";
 import { transcribeVideo } from "../services/transcription.service";
 import { generateAIMetadata } from "../services/ai-metadata.service";
 import { uploadVideoToS3 } from "../services/upload.service";
+import { User } from "../models/User";
+import { N8N_WEBHOOK_URL } from "../config";
 
 interface JobPayload {
   recordingId: string;
@@ -16,7 +19,6 @@ interface JobPayload {
 const processRecordingJob = async (job: Job<JobPayload>) => {
   const { recordingId, filePath, s3Key } = job.data;
 
-  // Helper: mark as FAILED in DB then re-throw so BullMQ retries
   const fail = async (err: unknown, stage: string) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[Worker] Job ${job.id} failed at ${stage}:`, message);
@@ -49,7 +51,7 @@ const processRecordingJob = async (job: Job<JobPayload>) => {
     aiMetadata = await generateAIMetadata(transcript);
     await Recording.findByIdAndUpdate(recordingId, {
       ai: aiMetadata,
-      title: aiMetadata.title, // overwrite placeholder title with AI title
+      title: aiMetadata.title,
       status: "AI_GENERATED",
     });
     await job.updateProgress(66);
@@ -69,17 +71,62 @@ const processRecordingJob = async (job: Job<JobPayload>) => {
     });
     await job.updateProgress(100);
     console.log(`[Worker] Upload complete for ${recordingId}`);
-  } catch (err) {
-    return fail(err, "S3_UPLOAD");
-  }
 
-  // ── Cleanup temp file ─────────────────────────────────────────────────────
-  try {
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    console.log(`[Worker] Cleaned up temp file for ${recordingId}`);
-  } catch {
-    // Non-fatal: log and move on, sweep cron will catch it
-    console.warn(`[Worker] Could not delete temp file: ${filePath}`);
+    // Cleanup temp file only on S3 success
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      console.log(`[Worker] Cleaned up temp file for ${recordingId}`);
+    } catch {
+      console.warn(`[Worker] Could not delete temp file: ${filePath}`);
+    }
+
+  } catch (s3Err) {
+    // ── S3 failed → trigger n8n fallback instead of hard-failing ─────────
+    const message = s3Err instanceof Error ? s3Err.message : String(s3Err);
+    console.error(`[Worker] S3 upload failed for ${recordingId}:`, message);
+
+    // Mark as FAILED in DB but keep temp file alive for n8n to download
+    await Recording.findByIdAndUpdate(recordingId, {
+      status: "FAILED",
+      error: `S3 upload failed: ${message}`,
+    });
+
+    // Look up the user so we can pass their chat_id and Drive tokens to n8n
+    const recording = await Recording.findById(recordingId);
+    const user = recording ? await User.findById(recording.userId) : null;
+
+    if (!user) {
+      console.error(`[Worker] Could not find user for recording ${recordingId} — skipping fallback`);
+      throw s3Err;
+    }
+
+    if (!N8N_WEBHOOK_URL) {
+      console.error(`[Worker] N8N_WEBHOOK_URL not set — skipping fallback`);
+      throw s3Err;
+    }
+
+    try {
+      console.log(`[Worker] Triggering n8n fallback for ${recordingId}`);
+      await fetch(N8N_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recordingId,
+          title:             aiMetadata.title,
+          filePath,          // absolute path on server — n8n uses temp-file endpoint instead
+          telegramChatId:    user.telegramChatId,
+          driveAccessToken:  user.driveAccessToken,
+          driveRefreshToken: user.driveRefreshToken,
+          // n8n will use this URL to download the file
+          tempFileUrl: `https://screen-rec-1.onrender.com/recordings/${recordingId}/temp-file`,
+        }),
+      });
+      console.log(`[Worker] n8n fallback triggered for ${recordingId}`);
+    } catch (webhookErr) {
+      console.error(`[Worker] Failed to trigger n8n webhook:`, webhookErr);
+    }
+
+    throw s3Err; // still re-throw so BullMQ marks the job as failed
   }
 };
 
