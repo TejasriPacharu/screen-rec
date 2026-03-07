@@ -91,6 +91,13 @@ class ApiClient {
   async getMe(): Promise<User> {
     return this.request<User>('/auth/me');
   }
+  
+  async registerTelegram(telegramChatId: string): Promise<void> {
+  await this.request('/recordings/telegram/register', {
+    method: 'POST',
+    body: JSON.stringify({ telegramChatId }),
+  });
+}
 
   // ── Core request helper ───────────────────────────────────────────────────
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {

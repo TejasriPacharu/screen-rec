@@ -2,6 +2,7 @@
 
 // frontend/src/lib/auth-context.tsx
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { useRouter } from 'next/navigation';
 import { apiClient, User } from './api';
 
 interface AuthContextType {
@@ -18,6 +19,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading]             = useState(true);
   const [user, setUser]                       = useState<User | null>(null);
+  const router                                = useRouter();
 
   useEffect(() => {
     const init = async () => {
@@ -29,8 +31,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const me = await apiClient.getMe();
         setUser(me);
         setIsAuthenticated(true);
+
+        // Redirect to Telegram setup if user hasn't set it up yet
+        // Only redirect if we're on the root page (not already on setup page)
+        if (!me.telegramChatId && window.location.pathname === '/') {
+          router.replace('/telegram-setup');
+        }
       } catch {
-        // Token invalid / expired — clear it
         apiClient.logout();
       } finally {
         setIsLoading(false);
@@ -45,6 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     apiClient.logout();
     setIsAuthenticated(false);
     setUser(null);
+    router.replace('/');
   };
 
   return (

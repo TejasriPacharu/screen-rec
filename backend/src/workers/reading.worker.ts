@@ -16,16 +16,76 @@ interface JobPayload {
   s3Key: string;
 }
 
+// ── Trigger n8n Drive fallback ────────────────────────────────────────────────
+const triggerFallback = async (
+  recordingId: string,
+  title: string,
+  filePath: string,
+  userId: string
+) => {
+  if (!N8N_WEBHOOK_URL) {
+    console.error(`[Worker] N8N_WEBHOOK_URL not set — skipping fallback`);
+    return;
+  }
+
+  const user = await User.findById(userId);
+  if (!user) {
+    console.error(`[Worker] User not found for recording ${recordingId} — skipping fallback`);
+    return;
+  }
+
+  // Temp file must still exist for n8n to download it
+  if (!fs.existsSync(filePath)) {
+    console.error(`[Worker] Temp file gone for ${recordingId} — skipping fallback`);
+    return;
+  }
+
+  try {
+    console.log(`[Worker] Triggering n8n fallback for ${recordingId}`);
+    await fetch(N8N_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recordingId,
+        title,
+        telegramChatId:    user.telegramChatId,
+        driveAccessToken:  user.driveAccessToken,
+        driveRefreshToken: user.driveRefreshToken,
+        tempFileUrl: `https://screen-rec-1.onrender.com/recordings/${recordingId}/temp-file`,
+      }),
+    });
+    console.log(`[Worker] n8n fallback triggered for ${recordingId}`);
+  } catch (webhookErr) {
+    console.error(`[Worker] Failed to trigger n8n webhook:`, webhookErr);
+  }
+};
+
 const processRecordingJob = async (job: Job<JobPayload>) => {
   const { recordingId, filePath, s3Key } = job.data;
 
+  // Fetch recording once to get userId + current title throughout the job
+  const recording = await Recording.findById(recordingId);
+  if (!recording) throw new Error(`Recording ${recordingId} not found`);
+  const userId = recording.userId.toString();
+
+  // ── Generic fail handler ──────────────────────────────────────────────────
+  // On ANY stage failure: mark FAILED in DB, trigger n8n fallback, re-throw
   const fail = async (err: unknown, stage: string) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[Worker] Job ${job.id} failed at ${stage}:`, message);
+
     await Recording.findByIdAndUpdate(recordingId, {
       status: "FAILED",
       error: `Failed at ${stage}: ${message}`,
     });
+
+    // Use the latest title if AI already generated one, otherwise use placeholder
+    const latestRecording = await Recording.findById(recordingId);
+    const title = latestRecording?.title || "Your Recording";
+
+    // Trigger Drive fallback for ALL failure stages
+    await triggerFallback(recordingId, title, filePath, userId);
+
     throw err;
   };
 
@@ -72,61 +132,15 @@ const processRecordingJob = async (job: Job<JobPayload>) => {
     await job.updateProgress(100);
     console.log(`[Worker] Upload complete for ${recordingId}`);
 
-    // Cleanup temp file only on S3 success
+    // Clean up temp file only on full success
     try {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
       console.log(`[Worker] Cleaned up temp file for ${recordingId}`);
     } catch {
       console.warn(`[Worker] Could not delete temp file: ${filePath}`);
     }
-
-  } catch (s3Err) {
-    // ── S3 failed → trigger n8n fallback instead of hard-failing ─────────
-    const message = s3Err instanceof Error ? s3Err.message : String(s3Err);
-    console.error(`[Worker] S3 upload failed for ${recordingId}:`, message);
-
-    // Mark as FAILED in DB but keep temp file alive for n8n to download
-    await Recording.findByIdAndUpdate(recordingId, {
-      status: "FAILED",
-      error: `S3 upload failed: ${message}`,
-    });
-
-    // Look up the user so we can pass their chat_id and Drive tokens to n8n
-    const recording = await Recording.findById(recordingId);
-    const user = recording ? await User.findById(recording.userId) : null;
-
-    if (!user) {
-      console.error(`[Worker] Could not find user for recording ${recordingId} — skipping fallback`);
-      throw s3Err;
-    }
-
-    if (!N8N_WEBHOOK_URL) {
-      console.error(`[Worker] N8N_WEBHOOK_URL not set — skipping fallback`);
-      throw s3Err;
-    }
-
-    try {
-      console.log(`[Worker] Triggering n8n fallback for ${recordingId}`);
-      await fetch(N8N_WEBHOOK_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          recordingId,
-          title:             aiMetadata.title,
-          filePath,          // absolute path on server — n8n uses temp-file endpoint instead
-          telegramChatId:    user.telegramChatId,
-          driveAccessToken:  user.driveAccessToken,
-          driveRefreshToken: user.driveRefreshToken,
-          // n8n will use this URL to download the file
-          tempFileUrl: `https://screen-rec-1.onrender.com/recordings/${recordingId}/temp-file`,
-        }),
-      });
-      console.log(`[Worker] n8n fallback triggered for ${recordingId}`);
-    } catch (webhookErr) {
-      console.error(`[Worker] Failed to trigger n8n webhook:`, webhookErr);
-    }
-
-    throw s3Err; // still re-throw so BullMQ marks the job as failed
+  } catch (err) {
+    return fail(err, "S3_UPLOAD");
   }
 };
 
