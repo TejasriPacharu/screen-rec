@@ -19,9 +19,9 @@ export const GROQ_API_KEY           = process.env.GROQ_API_KEY!;
 export const ELEVENLABS_API_KEY     = process.env.ELEVENLABS_API_KEY!;
 
 // ── Redis ─────────────────────────────────────────────────────────────────
-export const REDIS_HOST             = process.env.REDIS_HOST || "localhost";
+export const REDIS_HOST             = process.env.REDIS_HOST;
 export const REDIS_PORT             = Number(process.env.REDIS_PORT) || 6379;
-export const REDIS_PASSWORD         = process.env.REDIS_PASSWORD || undefined;
+export const REDIS_PASSWORD         = process.env.REDIS_PASSWORD ;
 
 // ── Google OAuth ──────────────────────────────────────────────────────────
 export const GOOGLE_CLIENT_ID       = process.env.GOOGLE_CLIENT_ID!;
