@@ -81,7 +81,9 @@ const processRecordingJob = async (job: Job<JobPayload>) => {
 
     // Use the latest title if AI already generated one, otherwise use placeholder
     const latestRecording = await Recording.findById(recordingId);
-    const title = latestRecording?.title || "Your Recording";
+    const title = latestRecording?.title && latestRecording.title !== "Processing..." 
+  ? latestRecording.title 
+  : `Recording-${new Date().toISOString().slice(0,19).replace('T','-')}`;
 
     // Trigger Drive fallback for ALL failure stages
     await triggerFallback(recordingId, title, filePath, userId);

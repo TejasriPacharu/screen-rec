@@ -1,196 +1,181 @@
-# Screen Recorder MVP
+# 🎬 Screen Recorder
 
-A full-stack screen recording application with video trimming, cloud storage, and sharing capabilities.
+Record your screen, trim it, share it — with an AI pipeline that never loses your work.
 
-## Features
+---
 
-- **Screen Recording**: Record screen + microphone using MediaRecorder API
-- **Video Trimming**: Client-side video editing with FFmpeg.wasm
-- **Cloud Storage**: Upload to S3-compatible storage (Backblaze B2)
-- **Share Links**: Generate public/private shareable video links
-- **Analytics**: Track view counts and basic video metrics
-- **Authentication**: JWT-based user system
+## What it does
+
+- **Record** your screen + microphone in the browser
+- **Trim** the recording client-side before uploading
+- **AI pipeline** auto-generates a title, summary, chapters, and key takeaways
+- **Share** via public or private links
+- **Fallback safety net** — if the cloud upload fails, your recording is saved to Google Drive and you get a Telegram notification instantly
+
+---
 
 ## Tech Stack
 
-### Frontend
-- **Next.js 14** with TypeScript
-- **Tailwind CSS** for styling
-- **FFmpeg.wasm** for video processing
-- **MediaRecorder API** for screen capture
+| Layer | Stack |
+|---|---|
+| Frontend | Next.js 14, TypeScript, Tailwind CSS, FFmpeg.wasm |
+| Backend | Express.js, TypeScript, MongoDB, BullMQ |
+| Auth | Google OAuth 2.0 (via Passport.js) |
+| AI |  Eleven Labs Scribe Model (transcription) + Groq Llama 3.3 70b (metadata) |
+| Storage | Backblaze B2 (S3-compatible) |
+| Queue | BullMQ + Upstash Redis |
+| Automation | n8n (self-hosted) |
+| Notifications | Telegram Bot API |
 
-### Backend
-- **Express.js** with TypeScript
-- **MongoDB** with Mongoose ODM
-- **AWS SDK** for S3-compatible storage
-- **JWT** for authentication
-- **bcrypt** for password hashing
+---
 
-## Setup Instructions
+## Features
+
+### Core
+- Screen + microphone recording via MediaRecorder API (up to 3 minutes)
+- Client-side video trimming with FFmpeg.wasm
+- Rename, delete, and toggle public/private on recordings
+- Search recordings with `⌘K`
+- Copy shareable links
+
+### AI Pipeline
+Every recording goes through a 3-stage pipeline after upload:
+
+```
+Audio → Eleven Labs Scribe → transcript
+Transcript → Groq Llama 3.3 70b → title, summary, chapters, key takeaways
+File → Backblaze B2 → permanent URL
+```
+
+### Fallback System
+If anything in the pipeline fails (transcription, AI, or S3 upload), n8n kicks in automatically:
+
+```
+Pipeline failure
+  → n8n webhook triggered
+  → File downloaded from temp storage
+  → Uploaded to your Google Drive
+  → Telegram message sent to you with the file name
+  → DB status updated to UPLOADED_TO_DRIVE
+```
+
+Nothing gets lost.
+
+### Auth
+- Google OAuth — one-click sign in, no passwords
+- JWT issued after OAuth callback
+- Protected routes and recordings
+
+### Telegram Notifications
+On first login, users connect their Telegram account for failure alerts. Setup takes 30 seconds:
+1. Message `@userinfobot` on Telegram → get your Chat ID
+2. Start `@screenrec_alerts_bot`
+3. Paste your Chat ID in the app
+
+---
+
+## Setup
 
 ### Prerequisites
-- Node.js 18+ and npm/yarn
-- MongoDB (local or cloud)
-- S3-compatible storage (AWS S3, Backblaze B2, etc.)
+- Node.js 18+
+- MongoDB (Atlas or local)
+- Backblaze B2 bucket
+- Groq API key (free tier)
+- Google Cloud project (OAuth + Drive API enabled)
+- n8n (self-hosted)
+- ngrok (to expose local n8n to Render)
 
-### Backend Setup
+### Backend `.env`
 
-1. **Navigate to backend directory**
-   ```bash
-   cd backend
-   ```
+```env
+MONGO_CONN_STR=
+JWT_SECRET=
+PORT=8989
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   # or
-   yarn install
-   ```
+# Storage
+S3_ENDPOINT=
+S3_KEY_ID=
+S3_APP_KEY=
+S3_BUCKET=
+S3_REGION=
 
-3. **Configure environment variables**
-   
-   Create `.env` file in the backend directory:
-   ```env
-   # Database
-   MONGO_CONN_STR=mongodb://localhost:27017/screen-recorder
-   
-   # JWT
-   JWT_SECRET=your-secure-jwt-secret-key-here
-   
-   # Server
-   PORT=8989
-   
-   # S3 Storage (example with Backblaze B2)
-   S3_ENDPOINT=https://s3.us-east-005.backblazeb2.com
-   S3_KEY_ID=your-s3-key-id
-   S3_APP_KEY=your-s3-secret-key
-   S3_BUCKET=your-bucket-name
-   S3_REGION=us-east-005
-   S3_CORS_ALLOWED_ORIGINS=http://localhost:3000
-   ```
+# Auth
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_CALLBACK_URL=https://your-backend.onrender.com/auth/google/callback
+FRONTEND_URL=https://your-frontend.onrender.com
 
-4. **Start development server**
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   ```
+# AI
+GROQ_API_KEY=
 
-   Server will run on `http://localhost:8989`
+# Automation
+N8N_WEBHOOK_URL=https://your-ngrok-url.ngrok-free.dev/webhook/s3-fallback
+INTERNAL_SECRET=
 
-### Frontend Setup
+# Redis (Upstash)
+REDIS_HOST=
+REDIS_PORT=6379
+REDIS_PASSWORD=
+```
 
-1. **Navigate to frontend directory**
-   ```bash
-   cd frontend
-   ```
+### Frontend `.env.local`
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   # or
-   yarn install
-   ```
+```env
+NEXT_PUBLIC_API_URL=https://your-backend.onrender.com
+NEXT_PUBLIC_URL=https://your-frontend.onrender.com
+```
 
-3. **Configure environment variables**
-   
-   Create `.env.local` file in the frontend directory:
-   ```env
-   NEXT_PUBLIC_API_URL=http://localhost:8989
-   NEXT_PUBLIC_URL=http://localhost:3000
-   ```
+### Run locally
 
-4. **Start development server**
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   ```
+```bash
+# Backend
+cd backend && npm install && npm run dev
 
-   Application will run on `http://localhost:3000`
+# Frontend
+cd frontend && npm install && npm run dev
+```
 
-### Database Setup
-
-1. **Install MongoDB** (if running locally)
-   - macOS: `brew install mongodb-community`
-   - Ubuntu: Follow [MongoDB installation guide](https://docs.mongodb.com/manual/installation/)
-   - Windows: Download from [MongoDB website](https://www.mongodb.com/try/download/community)
-
-2. **Start MongoDB service**
-   ```bash
-   # macOS/Linux
-   sudo systemctl start mongod
-   # or
-   brew services start mongodb-community
-   
-   # Windows
-   net start MongoDB
-   ```
-
-### S3 Storage Setup
-
-1. **Create S3 bucket** (or Backblaze B2 bucket)
-
-2. **Configure CORS policy** for your bucket:
-   ```json
-   [
-     {
-       "AllowedHeaders": ["*"],
-       "AllowedMethods": ["GET", "PUT", "POST", "DELETE"],
-       "AllowedOrigins": ["http://localhost:3000"],
-       "ExposeHeaders": ["ETag"]
-     }
-   ]
-   ```
-
-3. **Create access credentials** with appropriate permissions
-
-## Architecture Decisions
-
-### Client-Side Video Processing
-- **FFmpeg.wasm**: Chosen for client-side video trimming to reduce server load and provide instant feedback
-- **MediaRecorder API**: Native browser API for screen recording, ensuring compatibility and performance
-
-### Storage Strategy
-- **S3-Compatible Storage**: Using Backblaze B2 for cost-effective cloud storage
-- **Signed URLs**: Secure direct uploads and downloads without exposing credentials
-- **Presigned Upload URLs**: Allow direct client-to-storage uploads, reducing server bandwidth
-
-### Authentication & Security
-- **JWT Tokens**: Stateless authentication for scalability
-- **Conditional Auth**: Public recordings accessible without authentication, private recordings require auth
-- **bcrypt**: Industry-standard password hashing
-
-### Database Design
-- **MongoDB**: Document-based storage suitable for flexible recording metadata
-- **Mongoose ODM**: Type-safe database operations with schema validation
-
-### Frontend Architecture
-- **Next.js App Router**: Modern React framework with server-side rendering capabilities
-- **Component Composition**: Modular components for recording, trimming, and playback
-- **Context API**: Global authentication state management
+---
 
 ## API Endpoints
 
-### Authentication
-- `POST /auth/register` - User registration
-- `POST /auth/login` - User login
+### Auth
+| Method | Path | Description |
+|---|---|---|
+| GET | `/auth/google` | Initiate Google OAuth |
+| GET | `/auth/google/callback` | OAuth callback, issues JWT |
+| GET | `/auth/me` | Get current user |
 
 ### Recordings
-- `GET /recordings` - List user's recordings (authenticated)
-- `POST /recordings` - Create new recording entry and get upload URL
-- `GET /recordings/:link` - Get recording by share link (public/conditional auth)
-- `PUT /recordings/:id` - Update recording metadata
-- `DELETE /recordings/:id` - Delete recording and associated file
+| Method | Path | Description |
+|---|---|---|
+| GET | `/recordings` | List user's recordings |
+| POST | `/recordings/process` | Upload + queue AI pipeline |
+| GET | `/recordings/:link` | Get recording by share link |
+| PATCH | `/recordings/:id` | Update title, visibility |
+| DELETE | `/recordings/:id` | Delete recording |
+| GET | `/recordings/:id/temp-file` | Internal — n8n downloads file (requires `x-internal-secret`) |
+| PATCH | `/recordings/:id/drive-status` | Internal — n8n updates DB after Drive upload |
+| POST | `/recordings/telegram/register` | Save user's Telegram Chat ID |
 
+---
 
+## n8n Workflow
 
-## Contributing
+The fallback automation runs as an n8n workflow triggered by a webhook:
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+```
+Webhook (POST /webhook/s3-fallback)
+  → HTTP Request (download temp file from backend)
+  → Google Drive (upload file)
+  → Telegram (send notification)
+  → HTTP Request (update recording status in DB)
+```
 
+Deploy n8n locally and expose it via ngrok, or host it on Railway/Render for a permanent URL.
 
+---
+
+## Repo
+
+[github.com/TejasriPacharu/screen-rec](https://github.com/TejasriPacharu/screen-rec)
